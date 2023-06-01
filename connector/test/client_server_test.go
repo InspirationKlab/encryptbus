@@ -59,6 +59,11 @@ func runServer(t *testing.T, acceptingKey *ecdsa.PublicKey) {
 	})
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill)
 	defer cancel()
+
+	idBytes, _ := json.Marshal(identityData{Name: "some-client-correct"})
+
+	serv.Enqueue(string(idBytes), event.OutgoingEvent{Name: "server-initialized", Content: 3})
+
 	err := serv.Listen(":6775", ctx)
 	log.Println(err)
 }
@@ -95,6 +100,16 @@ func TestClientServer(t *testing.T) {
 			return err
 		}
 		log.Printf("Received event from server: %v\n", payload)
+		return nil
+	})
+
+	eventClient.On("server-initialized", func(cxt *reactor.EventBusContext) error {
+		var payload int64
+		err := cxt.ParseContent(&payload)
+		if err != nil {
+			return err
+		}
+		log.Printf("Received event from server {initialized}: %v\n", payload)
 		return nil
 	})
 

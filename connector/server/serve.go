@@ -9,16 +9,46 @@ import (
 	"github.com/inspirationklab/encryptbus/connector/identity"
 	"github.com/inspirationklab/encryptbus/connector/reactor"
 	"github.com/inspirationklab/encryptbus/crypto_io"
+	"github.com/inspirationklab/encryptbus/event"
 	"log"
 	"net"
 	"os"
+	"sync"
+	"time"
 )
 
 type EventDispatcher struct {
+	reactor.EventReactor
+
 	filter    func(conn net.Conn) bool
 	validator func(identity identity.SignedId) bool
-	reactor.EventReactor
+
+	sendQueue map[string][]event.OutgoingEvent
+	sendLock  sync.Mutex
+
 	logger *log.Logger
+}
+
+func (e *EventDispatcher) dequeue(target string) (event.OutgoingEvent, bool) {
+	e.sendLock.Lock()
+	defer e.sendLock.Unlock()
+	slice := e.sendQueue[target]
+	if len(slice) == 0 {
+		return event.OutgoingEvent{}, false
+	}
+	e.sendQueue[target] = e.sendQueue[target][1:]
+	return slice[0], true
+}
+
+func (e *EventDispatcher) Enqueue(target string, ev event.OutgoingEvent) {
+	e.sendLock.Lock()
+	defer e.sendLock.Unlock()
+
+	if e.sendQueue == nil {
+		e.sendQueue = map[string][]event.OutgoingEvent{}
+	}
+
+	e.sendQueue[target] = append(e.sendQueue[target], ev)
 }
 
 func (e *EventDispatcher) Validate(validator func(identity identity.SignedId) bool) {
@@ -35,6 +65,7 @@ func (e *EventDispatcher) Listen(addr string, ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+
 	defer l.Close()
 	for {
 		select {
@@ -85,7 +116,23 @@ func (e *EventDispatcher) serveConn(n net.Conn, ctx context.Context) error {
 		}
 	}
 
-	e.ServeManagedPipe(ctx, &reader, &writer, e.logger)
-
+	outC := e.ServeManagedPipe(ctx, &reader, &writer, e.logger)
+	go func() {
+		dequeueT := time.NewTicker(time.Millisecond * 50)
+		defer dequeueT.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-dequeueT.C:
+				outgoingEvent, hasEvent := e.dequeue(string(signedId.Id))
+				if !hasEvent {
+					continue
+				}
+				outC <- outgoingEvent
+				break
+			}
+		}
+	}()
 	return nil
 }
